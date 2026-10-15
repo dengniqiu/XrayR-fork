@@ -99,7 +99,7 @@ latest_version() {
     if command -v jq >/dev/null 2>&1; then
         tag="$(jq -r '.tag_name // empty' "$tmpfile" 2>/dev/null)"
     else
-        tag="$(grep -o '"tag_name":"[^"]*"' "$tmpfile" 2>/dev/null | cut -d'"' -f4)"
+        tag="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmpfile" | head -1)"
     fi
     rm -f "$tmpfile"
     if [[ -z "$tag" ]]; then
@@ -145,9 +145,9 @@ install() {
     local memory_kib
     memory_kib="$(total_memory_kib)"
     local low_memory=0
-    if [[ "$memory_kib" -gt 0 && "$memory_kib" -lt 524288 ]]; then
+    if [[ "$memory_kib" -gt 0 && "$memory_kib" -le 524288 ]]; then
         low_memory=1
-        echo -e "  检测到内存: $((memory_kib / 1024)) MiB，小于 512 MiB，使用直接下载模式"
+        echo -e "  检测到内存: $((memory_kib / 1024)) MiB，不超过 512 MiB，使用直接下载模式"
     else
         echo -e "  检测到内存: ${memory_kib} KiB，使用 ZIP 解压模式"
         need_command unzip

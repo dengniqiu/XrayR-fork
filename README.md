@@ -15,7 +15,7 @@ bash install.sh install
 
 ### 低内存机器
 
-当系统总内存小于 512 MiB 时，脚本会直接下载无压缩的 `XrayR-linux-*` 可执行文件，不调用 `unzip`，以降低解压阶段触发 OOM Killer 的风险。内存达到 512 MiB 或以上时，使用 ZIP 发布包安装。
+当系统总内存不超过 512 MiB 时，脚本会直接下载无压缩的 `XrayR-linux-*` 可执行文件，不调用 `unzip`，以降低解压阶段触发 OOM Killer 的风险。内存大于 512 MiB 时，使用 ZIP 发布包安装。
 
 ## 常用命令
 
