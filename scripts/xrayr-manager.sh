@@ -192,18 +192,28 @@ uninstall() {
     else
         systemctl disable "$SERVICE_NAME"
         rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        rm -rf -- /etc/systemd/system/XrayR.service.d
         systemctl daemon-reload
         systemctl reset-failed "$SERVICE_NAME"
     fi
     rm -rf -- "$CONFIG_DIR" "$INSTALL_DIR"
-    rm -f /etc/XrayR-manager.conf
+    local backup
+    for backup in "${CONFIG_DIR}".bak.*; do
+        [[ "${backup#"${CONFIG_DIR}.bak."}" =~ ^[0-9]{14}$ ]] || continue
+        rm -rf -- "$backup"
+    done
+    rm -rf -- /var/log/XrayR /var/cache/XrayR /var/cache/xrayr \
+        /etc/systemd/system/XrayR.service.d
+    rm -f -- /var/log/XrayR.log /var/log/XrayR.log.* \
+        /run/XrayR.pid /tmp/xrayr-manager.sh
+    rm -f /usr/bin/XrayR /usr/bin/xrayr /etc/XrayR-manager.conf
 
     echo ""
-    echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/XrayR -f${plain} 进行删除"
+    echo -e "${green}卸载完成，已清理管理脚本、配置备份、文件日志和 XrayR 缓存${plain}"
     echo ""
 
     if [[ $# == 0 ]]; then
-        before_show_menu
+        exit 0
     fi
 }
 

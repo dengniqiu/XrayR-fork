@@ -339,6 +339,30 @@ esac''')
                          "usr/bin/XrayR", "etc/XrayR-manager.conf"):
             self.assertFalse(self.path(relative).exists(), relative)
 
+    def test_uninstall_cleans_owned_logs_cache_and_backups(self):
+        for manager in (False, True):
+            with self.subTest(manager=manager):
+                self.install()
+                leftovers = (
+                    "var/log/XrayR.log", "var/log/XrayR.log.1",
+                    "var/log/XrayR/access.log", "var/cache/XrayR/cache.db",
+                    "var/cache/xrayr/cache.db", "run/XrayR.pid",
+                    "tmp/xrayr-manager.sh", "etc/XrayR.bak.20261105120000/config.yml",
+                )
+                for relative in leftovers:
+                    self.write(relative, "leftover")
+                self.write("etc/XrayR.bak.manual/config.yml", "keep")
+                self.write("var/log/other.log", "keep")
+                command = (
+                    'printf "y\\n" | bash /usr/bin/XrayR uninstall'
+                    if manager else "bash /test/install.sh uninstall"
+                )
+                self.run_shell(command)
+                for relative in leftovers + ("usr/bin/XrayR", "usr/bin/xrayr"):
+                    self.assertFalse(self.path(relative).exists(), relative)
+                self.assertTrue(self.path("etc/XrayR.bak.manual/config.yml").exists())
+                self.assertTrue(self.path("var/log/other.log").exists())
+
     def test_runtime_env_is_not_overwritten(self):
         self.write("etc/XrayR/runtime.env", "GOMEMLIMIT=80MiB\nGOGC=75\n")
         self.install()

@@ -460,10 +460,21 @@ uninstall() {
     else
         systemctl disable "$SERVICE_NAME" 2>/dev/null || true
         rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        rm -rf -- /etc/systemd/system/XrayR.service.d
         systemctl daemon-reload
+        systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
     fi
-    rm -rf "$CONFIG_DIR"
-    rm -rf "$INSTALL_DIR"
+    rm -rf -- "$CONFIG_DIR" "$INSTALL_DIR"
+    # Only remove timestamped backups produced by this installer.
+    local backup
+    for backup in "${CONFIG_DIR}".bak.*; do
+        [[ "${backup#"${CONFIG_DIR}.bak."}" =~ ^[0-9]{14}$ ]] || continue
+        rm -rf -- "$backup"
+    done
+    rm -rf -- /var/log/XrayR /var/cache/XrayR /var/cache/xrayr \
+        /etc/systemd/system/XrayR.service.d
+    rm -f -- /var/log/XrayR.log /var/log/XrayR.log.* \
+        /run/XrayR.pid /tmp/xrayr-manager.sh
     rm -f /usr/bin/XrayR /usr/bin/xrayr /etc/XrayR-manager.conf
     echo -e "${green}卸载完成！${plain}"
 }
