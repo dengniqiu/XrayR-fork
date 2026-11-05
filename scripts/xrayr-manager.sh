@@ -20,9 +20,21 @@ check_environment() {
         echo -e "${red}错误: 必须使用 root 用户运行此脚本${plain}" >&2
         return 1
     fi
-    local os_version=""
+    local os_version="" os_id=""
+    if [[ -f /etc/os-release ]]; then
+        IFS=: read -r os_id os_version <<< "$(
+            . /etc/os-release
+            printf '%s:%s\n' "${ID:-}" "${VERSION_ID:-}"
+        )"
+    fi
     release=""
-    if [[ -f /etc/alpine-release ]]; then
+    case "$os_id" in
+        ubuntu|debian|alpine) release="$os_id" ;;
+        centos|rhel|rocky|almalinux) release=centos ;;
+    esac
+    if [[ -n "$release" ]]; then
+        :
+    elif [[ -f /etc/alpine-release ]]; then
         release=alpine
     elif [[ -f /etc/redhat-release ]]; then
         release=centos
@@ -33,16 +45,18 @@ check_environment() {
     elif grep -Eqi 'centos|red hat|redhat' /etc/issue /proc/version 2>/dev/null; then
         release=centos
     fi
-    if [[ -f /etc/os-release ]]; then
-        os_version=$(awk -F'[= ."]' '/^VERSION_ID=/{print $3}' /etc/os-release)
-    fi
     if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
-        os_version=$(awk -F'[= ."]+' '/^DISTRIB_RELEASE=/{print $2}' /etc/lsb-release)
+        os_version=$(. /etc/lsb-release; printf '%s' "${DISTRIB_RELEASE:-}")
+    fi
+    os_version="${os_version%%.*}"
+    if [[ ! "$os_version" =~ ^[0-9]+$ ]]; then
+        echo "无法识别系统版本，将按服务管理器检测结果运行" >&2
+        os_version=""
     fi
     case "$release" in
-        centos) [[ "${os_version:-0}" -ge 7 ]] || { echo "请使用 CentOS 7 或更高版本" >&2; return 1; } ;;
-        ubuntu) [[ "${os_version:-0}" -ge 16 ]] || { echo "请使用 Ubuntu 16 或更高版本" >&2; return 1; } ;;
-        debian) [[ "${os_version:-0}" -ge 8 ]] || { echo "请使用 Debian 8 或更高版本" >&2; return 1; } ;;
+        centos) [[ -z "$os_version" ]] || ((10#$os_version >= 7)) || { echo "请使用 CentOS 7 或更高版本" >&2; return 1; } ;;
+        ubuntu) [[ -z "$os_version" ]] || ((10#$os_version >= 16)) || { echo "请使用 Ubuntu 16 或更高版本" >&2; return 1; } ;;
+        debian) [[ -z "$os_version" ]] || ((10#$os_version >= 8)) || { echo "请使用 Debian 8 或更高版本" >&2; return 1; } ;;
         alpine) ;;
         *) echo "未识别系统版本，将按服务管理器检测结果运行" >&2 ;;
     esac

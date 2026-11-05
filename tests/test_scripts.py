@@ -298,6 +298,32 @@ esac''')
             self.run_shell("bash /usr/bin/XrayR " + action)
         self.assertNotIn("rc-service", self.path("test/services").read_text())
 
+    def test_manager_os_release_versions(self):
+        self.systemd()
+        for os_id, version, ok in (
+            ("ubuntu", '"24.04"', True),
+            ("ubuntu", "24.04", True),
+            ("ubuntu", '"14.04"', False),
+            ("debian", "12", True),
+            ("debian", "7", False),
+            ("ubuntu", '""', True),
+        ):
+            with self.subTest(os_id=os_id, version=version):
+                self.write("etc/os-release", f"ID={os_id}\nVERSION_ID={version}\n")
+                self.run_shell(
+                    "source /test/scripts/xrayr-manager.sh; check_environment",
+                    ok=ok,
+                )
+
+    def test_debian_with_ubuntu_kernel_is_detected_as_debian(self):
+        self.systemd()
+        self.write("etc/os-release", 'ID=debian\nVERSION_ID="13"\n')
+        self.write("proc/version", "Linux version 7.2.9 Ubuntu custom kernel\n")
+        self.run_shell(
+            'source /test/scripts/xrayr-manager.sh; '
+            'check_environment && [[ "$release" == debian ]]'
+        )
+
     def test_manager_update_download_source(self):
         self.install()
         self.run_shell("bash /usr/bin/XrayR update v9.9.9")
