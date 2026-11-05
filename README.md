@@ -20,7 +20,3 @@ curl -fsSL https://raw.githubusercontent.com/dengniqiu/XrayR-fork/main/install.s
 ```
 
 卸载会删除安装目录和配置目录。
-
-## 低内存提示
-
-512 MiB 及以下自动使用低内存安装模式。128 MiB 机器请将程序安装到真实磁盘，避免 tmpfs/ramfs；安装优化不保证运行时不会耗尽内存。

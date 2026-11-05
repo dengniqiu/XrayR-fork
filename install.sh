@@ -240,9 +240,9 @@ Wants=network.target
 
 [Service]
 User=root
-WorkingDirectory="${INSTALL_DIR}"
-ExecStart="${INSTALL_DIR}/XrayR" --config "${CONFIG_DIR}/config.yml"
-EnvironmentFile=-"${CONFIG_DIR}/runtime.env"
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=${INSTALL_DIR}/XrayR --config ${CONFIG_DIR}/config.yml
+EnvironmentFile=-${CONFIG_DIR}/runtime.env
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=1048576
