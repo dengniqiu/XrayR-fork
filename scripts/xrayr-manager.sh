@@ -6,52 +6,71 @@ yellow='\033[0;33m'
 plain='\033[0m'
 
 version="v1.0.0"
+[[ ! -f /etc/XrayR-manager.conf ]] || source /etc/XrayR-manager.conf
+FORK_REPO="${XRAYR_REPO:-${XRAYR_SAVED_REPO:-dengniqiu/XrayR-fork}}"
+FORK_RAW="https://raw.githubusercontent.com/${FORK_REPO}/main"
+INSTALL_DIR="${XRAYR_INSTALL_DIR:-${XRAYR_SAVED_INSTALL_DIR:-/usr/local/XrayR}}"
+CONFIG_DIR="${XRAYR_CONFIG_DIR:-${XRAYR_SAVED_CONFIG_DIR:-/etc/XrayR}}"
+SERVICE_NAME="XrayR"
+SERVICE_MANAGER=""
+export XRAYR_REPO="$FORK_REPO" XRAYR_INSTALL_DIR="$INSTALL_DIR" XRAYR_CONFIG_DIR="$CONFIG_DIR"
 
-# check root
-[[ $EUID -ne 0 ]] && echo -e "${red}错误: ${plain} 必须使用root用户运行此脚本！\n" && exit 1
-
-# check os
-if [[ -f /etc/redhat-release ]]; then
-    release="centos"
-elif cat /etc/issue | grep -Eqi "debian"; then
-    release="debian"
-elif cat /etc/issue | grep -Eqi "ubuntu"; then
-    release="ubuntu"
-elif cat /etc/issue | grep -Eqi "centos|red hat|redhat"; then
-    release="centos"
-elif cat /proc/version | grep -Eqi "debian"; then
-    release="debian"
-elif cat /proc/version | grep -Eqi "ubuntu"; then
-    release="ubuntu"
-elif cat /proc/version | grep -Eqi "centos|red hat|redhat"; then
-    release="centos"
-else
-    echo -e "${red}未检测到系统版本，请联系脚本作者！${plain}\n" && exit 1
-fi
-
-os_version=""
-
-# os version
-if [[ -f /etc/os-release ]]; then
-    os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
-fi
-if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
-    os_version=$(awk -F'[= ."]+' '/DISTRIB_RELEASE/{print $2}' /etc/lsb-release)
-fi
-
-if [[ x"${release}" == x"centos" ]]; then
-    if [[ ${os_version} -le 6 ]]; then
-        echo -e "${red}请使用 CentOS 7 或更高版本的系统！${plain}\n" && exit 1
+check_environment() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${red}错误: 必须使用 root 用户运行此脚本${plain}" >&2
+        return 1
     fi
-elif [[ x"${release}" == x"ubuntu" ]]; then
-    if [[ ${os_version} -lt 16 ]]; then
-        echo -e "${red}请使用 Ubuntu 16 或更高版本的系统！${plain}\n" && exit 1
+    local os_version=""
+    release=""
+    if [[ -f /etc/alpine-release ]]; then
+        release=alpine
+    elif [[ -f /etc/redhat-release ]]; then
+        release=centos
+    elif grep -qi ubuntu /etc/issue /proc/version 2>/dev/null; then
+        release=ubuntu
+    elif grep -qi debian /etc/issue /proc/version 2>/dev/null; then
+        release=debian
+    elif grep -Eqi 'centos|red hat|redhat' /etc/issue /proc/version 2>/dev/null; then
+        release=centos
     fi
-elif [[ x"${release}" == x"debian" ]]; then
-    if [[ ${os_version} -lt 8 ]]; then
-        echo -e "${red}请使用 Debian 8 或更高版本的系统！${plain}\n" && exit 1
+    if [[ -f /etc/os-release ]]; then
+        os_version=$(awk -F'[= ."]' '/^VERSION_ID=/{print $3}' /etc/os-release)
     fi
-fi
+    if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
+        os_version=$(awk -F'[= ."]+' '/^DISTRIB_RELEASE=/{print $2}' /etc/lsb-release)
+    fi
+    case "$release" in
+        centos) [[ "${os_version:-0}" -ge 7 ]] || { echo "请使用 CentOS 7 或更高版本" >&2; return 1; } ;;
+        ubuntu) [[ "${os_version:-0}" -ge 16 ]] || { echo "请使用 Ubuntu 16 或更高版本" >&2; return 1; } ;;
+        debian) [[ "${os_version:-0}" -ge 8 ]] || { echo "请使用 Debian 8 或更高版本" >&2; return 1; } ;;
+        alpine) ;;
+        *) echo "未识别系统版本，将按服务管理器检测结果运行" >&2 ;;
+    esac
+    if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+        SERVICE_MANAGER=systemd
+    elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
+        SERVICE_MANAGER=openrc
+    else
+        echo -e "${red}未检测到 systemd 或 OpenRC 服务管理器${plain}" >&2
+        return 1
+    fi
+}
+
+service_action() {
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        rc-service "$SERVICE_NAME" "$1"
+    else
+        systemctl "$1" "$SERVICE_NAME"
+    fi
+}
+
+run_installer() (
+    local version="${1:-}" tmp_dir
+    tmp_dir="$(mktemp -d)" || return 1
+    trap 'rm -rf -- "$tmp_dir"' EXIT
+    curl -fL --retry 3 "${FORK_RAW}/install.sh" -o "${tmp_dir}/install.sh" || return 1
+    XRAYR_VERSION="$version" bash "${tmp_dir}/install.sh" install
+)
 
 confirm() {
     if [[ $# > 1 ]]; then
@@ -84,16 +103,7 @@ before_show_menu() {
 }
 
 install() {
-    local version=""
-    if [[ $# > 0 ]]; then
-        version="$2"
-    fi
-    if [[ -n "$version" ]]; then
-        XRAYR_VERSION="$version" bash <(curl -sL "https://raw.githubusercontent.com/zys960930/XrayR-fork/master/install.sh") install
-    else
-        bash <(curl -sL "https://raw.githubusercontent.com/zys960930/XrayR-fork/master/install.sh") install
-    fi
-    if [[ $? == 0 ]]; then
+    if run_installer "${2:-}"; then
         if [[ $# == 0 ]]; then
             start
         else
@@ -108,16 +118,11 @@ update() {
         echo && echo -n -e "输入指定版本(默认最新版): " && read version_input
         version="$version_input"
     else
-        version=$2
+        version="${2:-}"
     fi
-    if [[ -n "$version" ]]; then
-        XRAYR_VERSION="$version" bash <(curl -sL "https://raw.githubusercontent.com/zys960930/XrayR-fork/master/install.sh") install
-    else
-        bash <(curl -sL "https://raw.githubusercontent.com/zys960930/XrayR-fork/master/install.sh") install
-    fi
-    if [[ $? == 0 ]]; then
-        echo -e "${green}更新完成，已自动重启 XrayR，请使用 XrayR log 查看运行日志${plain}"
-        exit
+    if run_installer "$version"; then
+        echo -e "${green}更新完成，原来运行的服务已由安装器恢复；使用 XrayR status 查看状态${plain}"
+        return 0
     fi
 
     if [[ $# == 0 ]]; then
@@ -127,7 +132,7 @@ update() {
 
 config() {
     echo "XrayR在修改配置后会自动尝试重启"
-    vi /etc/XrayR/config.yml
+    vi "${CONFIG_DIR}/config.yml"
     sleep 2
     check_status
     case $? in
@@ -148,6 +153,17 @@ config() {
 }
 
 uninstall() {
+    local path
+    for path in "$INSTALL_DIR" "$CONFIG_DIR"; do
+        [[ "$path" == /* && "$path" =~ ^/[a-zA-Z0-9_./-]+$ ]] || return 1
+        case "$path" in
+            */../*|*/..|*/./*|*/.) echo "拒绝删除不安全的目录: $path" >&2; return 1 ;;
+        esac
+        case "${path%/}" in
+            ''|/|/etc|/usr|/usr/local|/bin|/sbin|/var|/var/log|/tmp|/root|/home|/mnt|/opt|/run)
+                echo "拒绝删除系统目录: $path" >&2; return 1 ;;
+        esac
+    done
     confirm "确定要卸载 XrayR 吗?" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
@@ -155,13 +171,18 @@ uninstall() {
         fi
         return 0
     fi
-    systemctl stop XrayR
-    systemctl disable XrayR
-    rm /etc/systemd/system/XrayR.service -f
-    systemctl daemon-reload
-    systemctl reset-failed
-    rm /etc/XrayR/ -rf
-    rm /usr/local/XrayR/ -rf
+    service_action stop
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        rc-update del "$SERVICE_NAME" default
+        rm -f "/etc/init.d/${SERVICE_NAME}"
+    else
+        systemctl disable "$SERVICE_NAME"
+        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload
+        systemctl reset-failed "$SERVICE_NAME"
+    fi
+    rm -rf -- "$CONFIG_DIR" "$INSTALL_DIR"
+    rm -f /etc/XrayR-manager.conf
 
     echo ""
     echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/XrayR -f${plain} 进行删除"
@@ -178,7 +199,7 @@ start() {
         echo ""
         echo -e "${green}XrayR已运行，无需再次启动，如需重启请选择重启${plain}"
     else
-        systemctl start XrayR
+        service_action start
         sleep 2
         check_status
         if [[ $? == 0 ]]; then
@@ -194,7 +215,7 @@ start() {
 }
 
 stop() {
-    systemctl stop XrayR
+    service_action stop
     sleep 2
     check_status
     if [[ $? == 1 ]]; then
@@ -209,7 +230,7 @@ stop() {
 }
 
 restart() {
-    systemctl restart XrayR
+    service_action restart
     sleep 2
     check_status
     if [[ $? == 0 ]]; then
@@ -223,15 +244,24 @@ restart() {
 }
 
 status() {
-    systemctl status XrayR --no-pager -l
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        service_action status
+    else
+        systemctl status "$SERVICE_NAME" --no-pager -l
+    fi
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
 }
 
 enable() {
-    systemctl enable XrayR
-    if [[ $? == 0 ]]; then
+    local result=0
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        rc-update add "$SERVICE_NAME" default || result=$?
+    else
+        systemctl enable "$SERVICE_NAME" || result=$?
+    fi
+    if [[ $result == 0 ]]; then
         echo -e "${green}XrayR 设置开机自启成功${plain}"
     else
         echo -e "${red}XrayR 设置开机自启失败${plain}"
@@ -243,8 +273,13 @@ enable() {
 }
 
 disable() {
-    systemctl disable XrayR
-    if [[ $? == 0 ]]; then
+    local result=0
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        rc-update del "$SERVICE_NAME" default || result=$?
+    else
+        systemctl disable "$SERVICE_NAME" || result=$?
+    fi
+    if [[ $result == 0 ]]; then
         echo -e "${green}XrayR 取消开机自启成功${plain}"
     else
         echo -e "${red}XrayR 取消开机自启失败${plain}"
@@ -256,13 +291,25 @@ disable() {
 }
 
 show_log() {
-    journalctl -u XrayR.service -e --no-pager -f
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        if [[ ! -f /var/log/XrayR.log ]]; then
+            echo "日志尚未生成，请先启动 XrayR"
+            return 1
+        fi
+        tail -n 100 -f /var/log/XrayR.log
+    else
+        journalctl -u "${SERVICE_NAME}.service" -e --no-pager -f
+    fi
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
 }
 
 install_bbr() {
+    if [[ "${release:-}" == alpine ]]; then
+        echo -e "${yellow}此第三方 BBR 内核安装脚本不支持 Alpine，已跳过${plain}"
+        return 1
+    fi
     bash <(curl -L -s https://raw.githubusercontent.com/chiakge/Linux-NetSpeed/master/tcp.sh)
     #if [[ $? == 0 ]]; then
     #    echo ""
@@ -276,7 +323,7 @@ install_bbr() {
 }
 
 update_shell() {
-    curl -sL "https://raw.githubusercontent.com/zys960930/XrayR-fork/master/scripts/xrayr-manager.sh" -o /usr/bin/XrayR && chmod +x /usr/bin/XrayR
+    curl -fL --retry 3 "${FORK_RAW}/scripts/xrayr-manager.sh" -o /usr/bin/XrayR && chmod +x /usr/bin/XrayR
     if [[ $? != 0 ]]; then
         echo ""
         echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"
@@ -289,23 +336,22 @@ update_shell() {
 
 # 0: running, 1: not running, 2: not installed
 check_status() {
-    if [[ ! -f /etc/systemd/system/XrayR.service ]]; then
-        return 2
-    fi
-    temp=$(systemctl status XrayR | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
-    if [[ x"${temp}" == x"running" ]]; then
-        return 0
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        [[ -f "/etc/init.d/${SERVICE_NAME}" ]] || return 2
+        rc-service "$SERVICE_NAME" status >/dev/null 2>&1
     else
-        return 1
+        [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]] || return 2
+        systemctl is-active --quiet "$SERVICE_NAME"
     fi
+    [[ $? == 0 ]] && return 0
+    return 1
 }
 
 check_enabled() {
-    temp=$(systemctl is-enabled XrayR)
-    if [[ x"${temp}" == x"enabled" ]]; then
-        return 0
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        [[ -e "/etc/runlevels/default/${SERVICE_NAME}" ]]
     else
-        return 1;
+        systemctl is-enabled --quiet "$SERVICE_NAME"
     fi
 }
 
@@ -364,7 +410,7 @@ show_enable_status() {
 
 show_XrayR_version() {
     echo -n "XrayR 版本："
-    /usr/local/XrayR/XrayR version
+    "${INSTALL_DIR}/XrayR" version
     echo ""
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -393,7 +439,7 @@ show_usage() {
 show_menu() {
     echo -e "
   ${green}XrayR 后端管理脚本，${plain}${red}不适用于docker${plain}
---- https://github.com/zys960930/XrayR-fork ---
+--- https://github.com/${FORK_REPO} ---
   ${green}0.${plain} 修改配置
 ————————————————
   ${green}1.${plain} 安装 XrayR
@@ -446,12 +492,14 @@ show_menu() {
         ;;
         13) update_shell
         ;;
-        *) echo -e "${red}请输入正确的数字 [0-12]${plain}"
+        *) echo -e "${red}请输入正确的数字 [0-13]${plain}"
         ;;
     esac
 }
 
 
+main() {
+check_environment || return 1
 if [[ $# > 0 ]]; then
     case $1 in
         "start") check_install 0 && start 0
@@ -468,9 +516,9 @@ if [[ $# > 0 ]]; then
         ;;
         "log") check_install 0 && show_log 0
         ;;
-        "update") check_install 0 && update 0 $2
+        "update") check_install 0 && update 0 "${2:-}"
         ;;
-        "config") config $*
+        "config") config "$@"
         ;;
         "install") check_uninstall 0 && install 0
         ;;
@@ -484,4 +532,9 @@ if [[ $# > 0 ]]; then
     esac
 else
     show_menu
+fi
+}
+
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+    main "$@"
 fi

@@ -10,13 +10,15 @@ yellow='\033[0;33m'
 plain='\033[0m'
 
 # ========== 可配置变量（支持环境变量覆盖） ==========
-FORK_REPO="${XRAYR_REPO:-dengniqiu/XrayR-fork}"
+[[ ! -f /etc/XrayR-manager.conf ]] || source /etc/XrayR-manager.conf
+FORK_REPO="${XRAYR_REPO:-${XRAYR_SAVED_REPO:-dengniqiu/XrayR-fork}}"
 FORK_RAW="https://raw.githubusercontent.com/${FORK_REPO}/main"
 API_BASE="https://api.github.com"
 RELEASE_BASE="https://github.com/${FORK_REPO}/releases/download"
-INSTALL_DIR="${XRAYR_INSTALL_DIR:-/usr/local/XrayR}"
-CONFIG_DIR="${XRAYR_CONFIG_DIR:-/etc/XrayR}"
+INSTALL_DIR="${XRAYR_INSTALL_DIR:-${XRAYR_SAVED_INSTALL_DIR:-/usr/local/XrayR}}"
+CONFIG_DIR="${XRAYR_CONFIG_DIR:-${XRAYR_SAVED_CONFIG_DIR:-/etc/XrayR}}"
 SERVICE_NAME="XrayR"
+SERVICE_MANAGER=""
 
 # ========== 工具函数 ==========
 fail() {
@@ -40,7 +42,7 @@ install_dep() {
     elif command -v dnf >/dev/null 2>&1; then
         dnf install -y "$cmd"
     elif command -v apk >/dev/null 2>&1; then
-        apk add "$cmd"
+        apk add --no-cache "$cmd"
     fi
     command -v "$cmd" >/dev/null 2>&1 || fail "$cmd 安装失败，请手动安装"
 }
@@ -50,11 +52,94 @@ download() {
     curl -fL --retry 3 --retry-delay 3 "$url" -o "$output"
 }
 
-# 返回系统总内存，单位为 KiB。读取失败时返回 0，由调用方按高内存流程处理。
+# 使用主机内存与容器 cgroup 限额的较小值，单位为 KiB。
 total_memory_kib() {
-    local memory
+    local memory limit path relative controller
     memory="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
-    [[ "$memory" =~ ^[0-9]+$ ]] && echo "$memory" || echo 0
+    [[ "$memory" =~ ^[0-9]+$ ]] || memory=0
+    local paths=(/sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes)
+    if [[ -r /proc/self/cgroup ]]; then
+        while IFS=: read -r _ controller relative; do
+            case "$controller" in
+                '') paths+=("/sys/fs/cgroup${relative%/}/memory.max") ;;
+                *memory*) paths+=("/sys/fs/cgroup/memory${relative%/}/memory.limit_in_bytes") ;;
+            esac
+        done < /proc/self/cgroup
+    fi
+    for path in "${paths[@]}"; do
+        [[ -r "$path" ]] || continue
+        limit="$(cat "$path" 2>/dev/null || true)"
+        # Ignore 'max' and the large v1 unlimited sentinel before arithmetic.
+        if [[ "$limit" =~ ^[0-9]+$ && ${#limit} -lt 16 && "$limit" -ge 1024 ]]; then
+            limit=$((limit / 1024))
+            if [[ "$memory" -eq 0 || "$limit" -lt "$memory" ]]; then
+                memory="$limit"
+            fi
+        fi
+    done
+    echo "$memory"
+}
+
+filesystem_type() {
+    df -PT "$1" 2>/dev/null | awk 'NR > 1 {print $2; exit}'
+}
+
+validate_paths() {
+    local path
+    for path in "$INSTALL_DIR" "$CONFIG_DIR"; do
+        # These paths are embedded in shell/service files and used by uninstall.
+        [[ "$path" == /* && "$path" =~ ^/[a-zA-Z0-9_./-]+$ ]] || fail "目录必须是绝对路径，且仅含字母、数字、下划线、点、短横线和斜线: $path"
+        case "$path" in
+            */../*|*/..|*/./*|*/.) fail "目录不能包含 . 或 .. 路径段: $path" ;;
+        esac
+        case "${path%/}" in
+            ''|/|/etc|/usr|/usr/local|/bin|/sbin|/var|/var/log|/tmp|/root|/home|/mnt|/opt|/run)
+                fail "拒绝将系统目录作为可卸载目录: $path" ;;
+        esac
+    done
+}
+
+write_manager_settings() {
+    local settings
+    settings="$(mktemp /etc/.XrayR-manager.XXXXXX)"
+    printf 'XRAYR_SAVED_REPO=%q\nXRAYR_SAVED_INSTALL_DIR=%q\nXRAYR_SAVED_CONFIG_DIR=%q\n' \
+        "$FORK_REPO" "$INSTALL_DIR" "$CONFIG_DIR" > "$settings"
+    chmod 600 "$settings"
+    mv -f -- "$settings" /etc/XrayR-manager.conf
+}
+
+detect_service_manager() {
+    if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+        SERVICE_MANAGER=systemd
+    elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
+        SERVICE_MANAGER=openrc
+    else
+        fail "未检测到正在使用的 systemd 或 OpenRC；Alpine 请使用 OpenRC 系统环境"
+    fi
+}
+
+service_installed() {
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        [[ -f "/etc/init.d/${SERVICE_NAME}" ]]
+    else
+        [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]
+    fi
+}
+
+service_running() {
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        rc-service "$SERVICE_NAME" status >/dev/null 2>&1
+    else
+        systemctl is-active --quiet "$SERVICE_NAME"
+    fi
+}
+
+service_action() {
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        rc-service "$SERVICE_NAME" "$1"
+    else
+        systemctl "$1" "$SERVICE_NAME"
+    fi
 }
 
 # ========== 架构检测（支持 10+ 种架构） ==========
@@ -82,26 +167,24 @@ detect_asset_name() {
 # ========== 获取最新版本号 ==========
 latest_version() {
     # 1. 尝试从 GitHub API 获取
-    local tmpfile="/tmp/xrayr-latest-version.$$"
-    curl -sSL --retry 2 --retry-delay 3 "${API_BASE}/repos/${FORK_REPO}/releases/latest" -o "$tmpfile" 2>/dev/null || {
+    local response
+    response="$(curl -fsSL --max-time 30 --retry 2 --retry-delay 3 "${API_BASE}/repos/${FORK_REPO}/releases/latest" 2>/dev/null)" || {
         # 2. API 失败，尝试从 raw 文件获取
         local ver
-        ver="$(curl -sSL --retry 2 --retry-delay 3 "${FORK_RAW}/VERSION" 2>/dev/null | head -1 | tr -d '[:space:]')"
+        ver="$(curl -fsSL --max-time 30 --retry 2 --retry-delay 3 "${FORK_RAW}/VERSION" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
         if [[ -n "$ver" ]]; then
             echo "$ver"
         else
             echo "v1.0.0"
         fi
-        rm -f "$tmpfile"
         return
     }
     local tag=""
     if command -v jq >/dev/null 2>&1; then
-        tag="$(jq -r '.tag_name // empty' "$tmpfile" 2>/dev/null)"
+        tag="$(printf '%s' "$response" | jq -r '.tag_name // empty' 2>/dev/null || true)"
     else
-        tag="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmpfile" | head -1)"
+        tag="$(printf '%s' "$response" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
     fi
-    rm -f "$tmpfile"
     if [[ -z "$tag" ]]; then
         echo "v1.0.0"
         return
@@ -109,9 +192,46 @@ latest_version() {
     echo "$tag"
 }
 
-# ========== 生成 systemd 服务文件（无需额外下载） ==========
+# ========== 生成服务文件（无需额外下载） ==========
 write_service() {
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        mkdir -p /etc/init.d
+        cat > "/etc/init.d/${SERVICE_NAME}" <<SERVICE
+#!/sbin/openrc-run
+description="XrayR Service"
+supervisor=supervise-daemon
+command="${INSTALL_DIR}/XrayR"
+command_args="--config \"${CONFIG_DIR}/config.yml\""
+directory="${INSTALL_DIR}"
+pidfile="/run/\${RC_SVCNAME}.pid"
+respawn_delay=10
+respawn_max=5
+respawn_period=60
+output_log="/var/log/XrayR.log"
+error_log="/var/log/XrayR.log"
+
+if [ -f "${CONFIG_DIR}/runtime.env" ]; then
+    set -a
+    . "${CONFIG_DIR}/runtime.env"
+    set +a
+fi
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath -f -m 0600 -o root:root "\$output_log"
+}
+SERVICE
+        chmod +x "/etc/init.d/${SERVICE_NAME}"
+        rc-update add "$SERVICE_NAME" default
+        echo "  ✓ OpenRC ${SERVICE_NAME}"
+        return
+    fi
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    mkdir -p /etc/systemd/system
     cat > "$service_file" <<SERVICE
 [Unit]
 Description=XrayR Service
@@ -120,8 +240,9 @@ Wants=network.target
 
 [Service]
 User=root
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/XrayR --config ${CONFIG_DIR}/config.yml
+WorkingDirectory="${INSTALL_DIR}"
+ExecStart="${INSTALL_DIR}/XrayR" --config "${CONFIG_DIR}/config.yml"
+EnvironmentFile=-"${CONFIG_DIR}/runtime.env"
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=1048576
@@ -130,15 +251,30 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 SERVICE
     echo "  ✓ ${SERVICE_NAME}.service"
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME"
+}
+
+write_runtime_env() {
+    local memory_kib="$1"
+    [[ -e "${CONFIG_DIR}/runtime.env" ]] && return 0
+    if [[ "$memory_kib" -gt 0 && "$memory_kib" -le 524288 ]]; then
+        # Soft Go runtime budget; not a process RSS limit or an OOM guarantee.
+        local budget_mib=$((memory_kib / 1024 / 2))
+        printf 'GOMEMLIMIT=%sMiB\nGOGC=50\n' "$budget_mib" > "${CONFIG_DIR}/runtime.env"
+        echo "  低内存运行参数: GOMEMLIMIT=${budget_mib}MiB, GOGC=50（软限制）"
+    fi
 }
 
 # ========== 安装流程 ==========
-install() {
+install() (
     echo -e "${green}===== 开始安装 XrayR =====${plain}"
 
     # 前置检查
     [[ $EUID -eq 0 ]] || fail "必须使用 root 用户运行此脚本"
     [[ "$(uname -s)" == "Linux" ]] || fail "仅支持 Linux 系统"
+    validate_paths
+    detect_service_manager
 
     # 依赖检查。低内存路径不需要 unzip，避免安装和运行解压程序时增加内存压力。
     need_command curl
@@ -170,6 +306,17 @@ install() {
 
     # 创建目录
     mkdir -p "$INSTALL_DIR" "$CONFIG_DIR"
+    local fs_type
+    fs_type="$(filesystem_type "$INSTALL_DIR" || true)"
+    if [[ "$low_memory" -eq 1 ]]; then
+        case "$fs_type" in
+            tmpfs|ramfs|rootfs)
+                fail "安装目录 ${INSTALL_DIR} 位于 ${fs_type} 内存盘。112 MiB 二进制无法安全放入此低内存环境；请将磁盘挂载到安装目录，或用 XRAYR_INSTALL_DIR 指向真实磁盘（Alpine diskless 根目录也可能是内存盘）"
+                ;;
+            '') fail "无法检测安装目录文件系统，停止下载以避免写入内存盘" ;;
+        esac
+        echo "  安装目录文件系统: ${fs_type}；下载文件直接暂存于安装目录，不使用 /tmp"
+    fi
 
     # 备份已有配置
     local has_existing=0
@@ -185,10 +332,30 @@ install() {
         cp -r "$CONFIG_DIR" "$backup_dir"
     fi
 
-    # 创建临时目录（函数退出时自动清理）
-    local tmp_dir
-    tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' RETURN
+    # 暂存于目标文件系统；无论成功、失败或收到信号均清理。
+    local tmp_dir was_running=0 binary_replaced=0 had_binary=0
+    tmp_dir="$(mktemp -d "${INSTALL_DIR}/.install.XXXXXX")"
+    cleanup_install() {
+        local result=$?
+        trap - EXIT
+        if [[ "$result" -ne 0 ]]; then
+            if [[ "$binary_replaced" -eq 1 ]]; then
+                if [[ "$had_binary" -eq 1 ]]; then
+                    mv -f -- "${tmp_dir}/previous-XrayR" "${INSTALL_DIR}/XrayR" || true
+                else
+                    rm -f -- "${INSTALL_DIR}/XrayR"
+                fi
+            fi
+            if [[ "$was_running" -eq 1 ]]; then
+                service_action start || echo "请检查 XrayR status，服务恢复失败" >&2
+            fi
+        fi
+        rm -rf -- "$tmp_dir"
+        exit "$result"
+    }
+    trap cleanup_install EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     # ---- [1/4] 下载 XrayR 二进制 ----
     echo -e "${yellow}[1/4] 下载 XrayR 二进制文件...${plain}"
@@ -205,6 +372,7 @@ install() {
         local archive="${tmp_dir}/XrayR-${asset_name}.zip"
         echo "  下载: ${asset_url}"
         download "$asset_url" "$archive" || fail "下载失败，请检查版本号是否存在"
+        mkdir -p "${tmp_dir}/archive"
         unzip -q "$archive" -d "${tmp_dir}/archive" || fail "解压失败"
 
         # zip 内二进制可能嵌套在子目录中
@@ -212,9 +380,9 @@ install() {
         [[ -n "$bin_file" ]] || fail "Release 文件中未找到 XrayR 二进制"
     fi
 
-    cp "$bin_file" "$INSTALL_DIR/XrayR"
-    chmod +x "$INSTALL_DIR/XrayR"
-    echo "  ✓ XrayR 二进制安装完成"
+    [[ -s "$bin_file" ]] || fail "下载的 XrayR 二进制为空"
+    chmod +x "$bin_file"
+    echo "  ✓ XrayR 二进制下载完成，等待原子替换"
 
     # ---- [2/4] 下载配置文件（已存在则跳过） ----
     echo -e "${yellow}[2/4] 下载配置文件...${plain}"
@@ -222,23 +390,42 @@ install() {
         if [[ -f "${CONFIG_DIR}/${f}" ]]; then
             echo -e "  ${yellow}${f} 已存在，跳过${plain}"
         else
-            download "${FORK_RAW}/config/${f}" "${CONFIG_DIR}/${f}" && echo "  ✓ ${f}" || echo "  ✗ ${f}"
+            download "${FORK_RAW}/config/${f}" "${tmp_dir}/${f}" || fail "配置 ${f} 下载失败"
+            mv -f -- "${tmp_dir}/${f}" "${CONFIG_DIR}/${f}"
+            echo "  ✓ ${f}"
         fi
     done
 
     # ---- [3/4] 下载管理脚本 ----
     echo -e "${yellow}[3/4] 下载管理脚本...${plain}"
-    download "${FORK_RAW}/scripts/xrayr-manager.sh" /usr/bin/XrayR || fail "管理脚本下载失败"
-    chmod +x /usr/bin/XrayR
-    ln -sf /usr/bin/XrayR /usr/bin/xrayr
-    echo "  ✓ XrayR 管理脚本"
+    download "${FORK_RAW}/scripts/xrayr-manager.sh" "${tmp_dir}/xrayr-manager.sh" || fail "管理脚本下载失败"
+    bash -n "${tmp_dir}/xrayr-manager.sh" || fail "管理脚本语法不正确"
+    chmod +x "${tmp_dir}/xrayr-manager.sh"
 
-    # ---- [4/4] 配置 systemd 服务 ----
-    echo -e "${yellow}[4/4] 配置 systemd 服务...${plain}"
+    # ---- [4/4] 配置服务 ----
+    echo -e "${yellow}[4/4] 配置 ${SERVICE_MANAGER} 服务...${plain}"
+    # Rename on the same filesystem, retaining the old executable for rollback.
+    # Do not create a second in-memory copy or truncate a running executable.
+    if service_installed && service_running; then
+        service_action stop
+        was_running=1
+    fi
+    if [[ -f "${INSTALL_DIR}/XrayR" ]]; then
+        mv -- "${INSTALL_DIR}/XrayR" "${tmp_dir}/previous-XrayR"
+        had_binary=1
+    fi
+    binary_replaced=1
+    mv -- "$bin_file" "${INSTALL_DIR}/XrayR"
+    mv -f -- "${tmp_dir}/xrayr-manager.sh" /usr/bin/XrayR
+    ln -sf /usr/bin/XrayR /usr/bin/xrayr
+    write_manager_settings
+    write_runtime_env "$memory_kib"
     write_service
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
     echo -e "${green}  ✓ 已设置开机自启${plain}"
+    if [[ "$was_running" -eq 1 ]]; then
+        service_action start
+        echo "  ✓ 已重新启动原来运行的服务"
+    fi
 
     # ---- 完成 ----
     echo ""
@@ -250,7 +437,7 @@ install() {
     echo ""
     echo -e "${green}请先编辑配置文件，修改你的面板信息:${plain}"
     echo -e "  vi ${CONFIG_DIR}/config.yml"
-}
+)
 
 # ========== 更新管理脚本 ==========
 update_shell() {
@@ -263,17 +450,26 @@ update_shell() {
 # ========== 卸载 ==========
 uninstall() {
     echo -e "${red}卸载 XrayR...${plain}"
-    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
-    systemctl daemon-reload
+    [[ $EUID -eq 0 ]] || fail "必须使用 root 用户运行此脚本"
+    validate_paths
+    detect_service_manager
+    service_action stop 2>/dev/null || true
+    if [[ "$SERVICE_MANAGER" == openrc ]]; then
+        rc-update del "$SERVICE_NAME" default 2>/dev/null || true
+        rm -f "/etc/init.d/${SERVICE_NAME}"
+    else
+        systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload
+    fi
     rm -rf "$CONFIG_DIR"
     rm -rf "$INSTALL_DIR"
-    rm -f /usr/bin/XrayR /usr/bin/xrayr
+    rm -f /usr/bin/XrayR /usr/bin/xrayr /etc/XrayR-manager.conf
     echo -e "${green}卸载完成！${plain}"
 }
 
 # ========== 入口 ==========
+main() {
 case "${1:-}" in
     install) install ;;
     uninstall) uninstall ;;
@@ -292,3 +488,8 @@ case "${1:-}" in
         echo "  XRAYR_CONFIG_DIR=/path  - 配置目录"
         ;;
 esac
+}
+
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+    main "$@"
+fi
