@@ -10,10 +10,13 @@ version="v1.0.0"
 FORK_REPO="${XRAYR_REPO:-${XRAYR_SAVED_REPO:-dengniqiu/XrayR-fork}}"
 FORK_RAW="https://raw.githubusercontent.com/${FORK_REPO}/main"
 INSTALL_DIR="${XRAYR_INSTALL_DIR:-${XRAYR_SAVED_INSTALL_DIR:-/usr/local/XrayR}}"
+CMD_NAME="${XRAYR_CMD_NAME:-${XRAYR_SAVED_CMD_NAME:-XrayR}}"
+CMD_ALIAS="${CMD_NAME,,}"
 CONFIG_DIR="${XRAYR_CONFIG_DIR:-${XRAYR_SAVED_CONFIG_DIR:-/etc/XrayR}}"
 SERVICE_NAME="XrayR"
 SERVICE_MANAGER=""
-export XRAYR_REPO="$FORK_REPO" XRAYR_INSTALL_DIR="$INSTALL_DIR" XRAYR_CONFIG_DIR="$CONFIG_DIR"
+export XRAYR_REPO="$FORK_REPO" XRAYR_INSTALL_DIR="$INSTALL_DIR" XRAYR_CONFIG_DIR="$CONFIG_DIR" \
+    XRAYR_CMD_NAME="$CMD_NAME"
 
 check_environment() {
     if [[ $EUID -ne 0 ]]; then
@@ -135,7 +138,7 @@ update() {
         version="${2:-}"
     fi
     if run_installer "$version"; then
-        echo -e "${green}更新完成，原来运行的服务已由安装器恢复；使用 XrayR status 查看状态${plain}"
+        echo -e "${green}更新完成，原来运行的服务已由安装器恢复；使用 ${CMD_NAME} status 查看状态${plain}"
         return 0
     fi
 
@@ -206,7 +209,12 @@ uninstall() {
         /etc/systemd/system/XrayR.service.d
     rm -f -- /var/log/XrayR.log /var/log/XrayR.log.* \
         /run/XrayR.pid /tmp/xrayr-manager.sh
-    rm -f /usr/bin/XrayR /usr/bin/xrayr /etc/XrayR-manager.conf
+    if [[ "$CONFIG_DIR" != "/etc/XrayR" && -d /etc/XrayR \
+        && ! -f /etc/XrayR/config.yml ]]; then
+        rm -rf -- /etc/XrayR
+    fi
+    rm -f -- "/usr/bin/${CMD_NAME}" "/usr/bin/${CMD_ALIAS}" \
+        /usr/bin/XrayR /usr/bin/xrayr /etc/XrayR-manager.conf
 
     echo ""
     echo -e "${green}卸载完成，已清理管理脚本、配置备份、文件日志和 XrayR 缓存${plain}"
@@ -227,9 +235,9 @@ start() {
         sleep 2
         check_status
         if [[ $? == 0 ]]; then
-            echo -e "${green}XrayR 启动成功，请使用 XrayR log 查看运行日志${plain}"
+            echo -e "${green}XrayR 启动成功，请使用 ${CMD_NAME} log 查看运行日志${plain}"
         else
-            echo -e "${red}XrayR可能启动失败，请稍后使用 XrayR log 查看日志信息${plain}"
+            echo -e "${red}XrayR可能启动失败，请稍后使用 ${CMD_NAME} log 查看日志信息${plain}"
         fi
     fi
 
@@ -258,9 +266,9 @@ restart() {
     sleep 2
     check_status
     if [[ $? == 0 ]]; then
-        echo -e "${green}XrayR 重启成功，请使用 XrayR log 查看运行日志${plain}"
+        echo -e "${green}XrayR 重启成功，请使用 ${CMD_NAME} log 查看运行日志${plain}"
     else
-        echo -e "${red}XrayR可能启动失败，请稍后使用 XrayR log 查看日志信息${plain}"
+        echo -e "${red}XrayR可能启动失败，请稍后使用 ${CMD_NAME} log 查看日志信息${plain}"
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -347,13 +355,14 @@ install_bbr() {
 }
 
 update_shell() {
-    curl -fL --retry 3 "${FORK_RAW}/scripts/xrayr-manager.sh" -o /usr/bin/XrayR && chmod +x /usr/bin/XrayR
+    curl -fL --retry 3 "${FORK_RAW}/scripts/xrayr-manager.sh" -o "/usr/bin/${CMD_NAME}" && chmod +x "/usr/bin/${CMD_NAME}"
     if [[ $? != 0 ]]; then
         echo ""
         echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"
         before_show_menu
     else
-        chmod +x /usr/bin/XrayR
+        chmod +x "/usr/bin/${CMD_NAME}"
+        [[ "$CMD_ALIAS" == "$CMD_NAME" ]] || ln -sfn "/usr/bin/${CMD_NAME}" "/usr/bin/${CMD_ALIAS}"
         echo -e "${green}升级脚本成功，请重新运行脚本${plain}" && exit 0
     fi
 }
@@ -442,27 +451,27 @@ show_XrayR_version() {
 }
 
 show_usage() {
-    echo "XrayR 管理脚本使用方法: "
+    echo "${CMD_NAME} 管理脚本使用方法: "
     echo "------------------------------------------"
-    echo "XrayR              - 显示管理菜单 (功能更多)"
-    echo "XrayR start        - 启动 XrayR"
-    echo "XrayR stop         - 停止 XrayR"
-    echo "XrayR restart      - 重启 XrayR"
-    echo "XrayR status       - 查看 XrayR 状态"
-    echo "XrayR enable       - 设置 XrayR 开机自启"
-    echo "XrayR disable      - 取消 XrayR 开机自启"
-    echo "XrayR log          - 查看 XrayR 日志"
-    echo "XrayR update       - 更新 XrayR"
-    echo "XrayR update x.x.x - 更新 XrayR 指定版本"
-    echo "XrayR install      - 安装 XrayR"
-    echo "XrayR uninstall    - 卸载 XrayR"
-    echo "XrayR version      - 查看 XrayR 版本"
+    echo "${CMD_NAME} <无参数>       - 显示管理菜单 (功能更多)"
+    echo "${CMD_NAME} start          - 启动服务"
+    echo "${CMD_NAME} stop           - 停止服务"
+    echo "${CMD_NAME} restart        - 重启服务"
+    echo "${CMD_NAME} status         - 查看服务状态"
+    echo "${CMD_NAME} enable         - 设置开机自启"
+    echo "${CMD_NAME} disable        - 取消开机自启"
+    echo "${CMD_NAME} log            - 查看日志"
+    echo "${CMD_NAME} update         - 更新程序"
+    echo "${CMD_NAME} update x.x.x   - 更新指定版本"
+    echo "${CMD_NAME} install        - 安装"
+    echo "${CMD_NAME} uninstall      - 卸载"
+    echo "${CMD_NAME} version        - 查看版本"
     echo "------------------------------------------"
 }
 
 show_menu() {
     echo -e "
-  ${green}XrayR 后端管理脚本，${plain}${red}不适用于docker${plain}
+  ${green}${CMD_NAME} 后端管理脚本，${plain}${red}不适用于docker${plain}
 --- https://github.com/${FORK_REPO} ---
   ${green}0.${plain} 修改配置
 ————————————————

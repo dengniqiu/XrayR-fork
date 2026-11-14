@@ -16,9 +16,19 @@ FORK_RAW="https://raw.githubusercontent.com/${FORK_REPO}/main"
 API_BASE="https://api.github.com"
 RELEASE_BASE="https://github.com/${FORK_REPO}/releases/download"
 INSTALL_DIR="${XRAYR_INSTALL_DIR:-${XRAYR_SAVED_INSTALL_DIR:-/usr/local/XrayR}}"
-CONFIG_DIR="${XRAYR_CONFIG_DIR:-${XRAYR_SAVED_CONFIG_DIR:-/etc/XrayR}}"
+CMD_NAME="${XRAYR_CMD_NAME:-${XRAYR_SAVED_CMD_NAME:-XrayR}}"
+CMD_ALIAS="${CMD_NAME,,}"
+CONFIG_DIR="${XRAYR_CONFIG_DIR:-${XRAYR_SAVED_CONFIG_DIR:-}}"
+if [[ -z "$CONFIG_DIR" ]]; then
+    if [[ "$CMD_NAME" == "XrayR" ]]; then
+        CONFIG_DIR=/etc/XrayR
+    else
+        CONFIG_DIR="/etc/${CMD_ALIAS}"
+    fi
+fi
 SERVICE_NAME="XrayR"
 SERVICE_MANAGER=""
+LEGACY_CONFIG_DIR="/etc/XrayR"
 
 # ========== 工具函数 ==========
 fail() {
@@ -80,6 +90,92 @@ total_memory_kib() {
     echo "$memory"
 }
 
+# ========== 命令名称与配置目录 ==========
+valid_command_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+command_name_free() {
+    local target="/usr/bin/$1"
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+        return 0
+    fi
+    # 已安装的旧管理脚本可以覆盖，其他程序占用则拒绝。
+    [[ -L "$target" ]] && return 0
+    grep -q 'xrayr-manager\|XrayR' "$target" 2>/dev/null
+}
+
+can_prompt() {
+    [[ "${XRAYR_NONINTERACTIVE:-0}" == "1" ]] && return 1
+    [[ -r /dev/tty && -w /dev/tty ]] || return 1
+    # 标准输入被重定向成脚本文件时按非交互处理，避免等待输入。
+    [[ -f /dev/stdin ]] && return 1
+    return 0
+}
+
+# 只从终端读取，避免 curl | bash 时把脚本文本当成回答。
+prompt_line() {
+    local prompt="$1" default="$2" answer=""
+    printf '%s' "$prompt" > /dev/tty
+    IFS= read -r answer < /dev/tty || answer=""
+    [[ -n "$answer" ]] || answer="$default"
+    REPLY="$answer"
+}
+
+configure_names() {
+    local name
+    can_prompt || return 0
+    if [[ -z "${XRAYR_CMD_NAME:-}" ]]; then
+        echo > /dev/tty
+        prompt_line "是否修改管理命令名称 (当前 ${CMD_NAME}/${CMD_ALIAS})? [y/N]: " n
+        if [[ "$REPLY" =~ ^[Yy] ]]; then
+            prompt_line "新的命令名称 (默认 ${CMD_NAME}): " "$CMD_NAME"
+            name="$REPLY"
+            if ! valid_command_name "$name"; then
+                echo "名称只能包含字母、数字、点、下划线或短横线，且不能以符号开头，保持 ${CMD_NAME}" > /dev/tty
+            elif ! command_name_free "$name"; then
+                echo "/usr/bin/${name} 已被其他程序占用，保持 ${CMD_NAME}" > /dev/tty
+            else
+                CMD_NAME="$name"
+                CMD_ALIAS="${name,,}"
+                if [[ -z "${XRAYR_CONFIG_DIR:-}" ]]; then
+                    CONFIG_DIR="/etc/${CMD_ALIAS}"
+                fi
+                echo "管理命令: ${CMD_NAME} (别名 ${CMD_ALIAS})" > /dev/tty
+            fi
+        fi
+    fi
+    [[ -n "${XRAYR_CONFIG_DIR:-}" ]] && return 0
+    echo > /dev/tty
+    prompt_line "是否修改配置目录 (当前 ${CONFIG_DIR})? [y/N]: " n
+    [[ "$REPLY" =~ ^[Yy] ]] || return 0
+    prompt_line "新的配置目录 (默认 ${CONFIG_DIR}): " "$CONFIG_DIR"
+    CONFIG_DIR="${REPLY%/}"
+}
+
+migrate_legacy_config() {
+    [[ "$CONFIG_DIR" == "$LEGACY_CONFIG_DIR" ]] && return 0
+    [[ -d "$LEGACY_CONFIG_DIR" ]] || return 0
+    if [[ ! -e "$CONFIG_DIR" ]]; then
+        mv -- "$LEGACY_CONFIG_DIR" "$CONFIG_DIR"
+        echo "  已把旧配置目录 ${LEGACY_CONFIG_DIR} 迁移到 ${CONFIG_DIR}"
+    elif [[ ! -f "${CONFIG_DIR}/config.yml" && -f "${LEGACY_CONFIG_DIR}/config.yml" ]]; then
+        cp -a -- "${LEGACY_CONFIG_DIR}/." "${CONFIG_DIR}/"
+        echo -e "  ${yellow}已复制旧配置到 ${CONFIG_DIR}，旧目录 ${LEGACY_CONFIG_DIR} 未被删除${plain}"
+    fi
+}
+
+install_manager_command() {
+    local source="$1" name
+    for name in XrayR xrayr; do
+        [[ "$name" == "$CMD_NAME" || "$name" == "$CMD_ALIAS" ]] && continue
+        rm -f -- "/usr/bin/${name}"
+    done
+    mv -f -- "$source" "/usr/bin/${CMD_NAME}"
+    chmod 755 "/usr/bin/${CMD_NAME}"
+    [[ "$CMD_ALIAS" == "$CMD_NAME" ]] || ln -sfn "/usr/bin/${CMD_NAME}" "/usr/bin/${CMD_ALIAS}"
+}
+
 filesystem_type() {
     df -PT "$1" 2>/dev/null | awk 'NR > 1 {print $2; exit}'
 }
@@ -102,8 +198,8 @@ validate_paths() {
 write_manager_settings() {
     local settings
     settings="$(mktemp /etc/.XrayR-manager.XXXXXX)"
-    printf 'XRAYR_SAVED_REPO=%q\nXRAYR_SAVED_INSTALL_DIR=%q\nXRAYR_SAVED_CONFIG_DIR=%q\n' \
-        "$FORK_REPO" "$INSTALL_DIR" "$CONFIG_DIR" > "$settings"
+    printf 'XRAYR_SAVED_REPO=%q\nXRAYR_SAVED_INSTALL_DIR=%q\nXRAYR_SAVED_CONFIG_DIR=%q\nXRAYR_SAVED_CMD_NAME=%q\n' \
+        "$FORK_REPO" "$INSTALL_DIR" "$CONFIG_DIR" "$CMD_NAME" > "$settings"
     chmod 600 "$settings"
     mv -f -- "$settings" /etc/XrayR-manager.conf
 }
@@ -273,8 +369,11 @@ install() (
     # 前置检查
     [[ $EUID -eq 0 ]] || fail "必须使用 root 用户运行此脚本"
     [[ "$(uname -s)" == "Linux" ]] || fail "仅支持 Linux 系统"
+    configure_names
+    valid_command_name "$CMD_NAME" || fail "管理命令名称不合法: $CMD_NAME"
     validate_paths
     detect_service_manager
+    migrate_legacy_config
 
     # 依赖检查。低内存路径不需要 unzip，避免安装和运行解压程序时增加内存压力。
     need_command curl
@@ -416,8 +515,7 @@ install() (
     fi
     binary_replaced=1
     mv -- "$bin_file" "${INSTALL_DIR}/XrayR"
-    mv -f -- "${tmp_dir}/xrayr-manager.sh" /usr/bin/XrayR
-    ln -sf /usr/bin/XrayR /usr/bin/xrayr
+    install_manager_command "${tmp_dir}/xrayr-manager.sh"
     write_manager_settings
     write_runtime_env "$memory_kib"
     write_service
@@ -432,8 +530,9 @@ install() (
     echo -e "${green}===== 安装完成 =====${plain}"
     echo ""
     echo -e "配置文件: ${yellow}${CONFIG_DIR}/config.yml${plain}"
-    echo -e "启动服务: ${yellow}XrayR start${plain}"
-    echo -e "查看状态: ${yellow}XrayR status${plain}"
+    echo -e "管理命令: ${yellow}${CMD_NAME}${plain} (别名 ${CMD_ALIAS})"
+    echo -e "启动服务: ${yellow}${CMD_NAME} start${plain}"
+    echo -e "查看状态: ${yellow}${CMD_NAME} status${plain}"
     echo ""
     echo -e "${green}请先编辑配置文件，修改你的面板信息:${plain}"
     echo -e "  vi ${CONFIG_DIR}/config.yml"
@@ -442,8 +541,9 @@ install() (
 # ========== 更新管理脚本 ==========
 update_shell() {
     echo -e "${green}更新管理脚本...${plain}"
-    download "${FORK_RAW}/scripts/xrayr-manager.sh" /usr/bin/XrayR || fail "下载失败"
-    chmod +x /usr/bin/XrayR
+    download "${FORK_RAW}/scripts/xrayr-manager.sh" "/usr/bin/${CMD_NAME}" || fail "下载失败"
+    chmod +x "/usr/bin/${CMD_NAME}"
+    [[ "$CMD_ALIAS" == "$CMD_NAME" ]] || ln -sfn "/usr/bin/${CMD_NAME}" "/usr/bin/${CMD_ALIAS}"
     echo -e "${green}管理脚本更新完成！${plain}"
 }
 
@@ -465,6 +565,11 @@ uninstall() {
         systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
     fi
     rm -rf -- "$CONFIG_DIR" "$INSTALL_DIR"
+    # 迁移后遗留的空目录只有在不再含配置文件时才清理。
+    if [[ "$CONFIG_DIR" != "$LEGACY_CONFIG_DIR" && -d "$LEGACY_CONFIG_DIR" \
+        && ! -f "${LEGACY_CONFIG_DIR}/config.yml" ]]; then
+        rm -rf -- "$LEGACY_CONFIG_DIR"
+    fi
     # Only remove timestamped backups produced by this installer.
     local backup
     for backup in "${CONFIG_DIR}".bak.*; do
@@ -475,7 +580,8 @@ uninstall() {
         /etc/systemd/system/XrayR.service.d
     rm -f -- /var/log/XrayR.log /var/log/XrayR.log.* \
         /run/XrayR.pid /tmp/xrayr-manager.sh
-    rm -f /usr/bin/XrayR /usr/bin/xrayr /etc/XrayR-manager.conf
+    rm -f -- "/usr/bin/${CMD_NAME}" "/usr/bin/${CMD_ALIAS}" \
+        /usr/bin/XrayR /usr/bin/xrayr /etc/XrayR-manager.conf
     echo -e "${green}卸载完成！${plain}"
 }
 
@@ -497,6 +603,8 @@ case "${1:-}" in
         echo "  XRAYR_REPO=user/repo    - 指定仓库（默认 dengniqiu/XrayR-fork）"
         echo "  XRAYR_INSTALL_DIR=/path - 安装目录"
         echo "  XRAYR_CONFIG_DIR=/path  - 配置目录"
+        echo "  XRAYR_CMD_NAME=name     - 管理命令名称（默认 XrayR，另建小写别名）"
+        echo "  XRAYR_NONINTERACTIVE=1  - 跳过命令名称与配置目录的交互提问"
         ;;
 esac
 }

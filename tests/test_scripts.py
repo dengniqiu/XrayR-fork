@@ -281,6 +281,46 @@ esac''')
         self.assertIn("/disk/config/config.yml", self.path("etc/init.d/XrayR").read_text())
         self.assert_clean("disk/XrayR")
 
+    def test_custom_command_name_and_config_dir(self):
+        self.install(prefix="XRAYR_CMD_NAME=xr ")
+        self.assertTrue(self.path("usr/bin/xr").is_file())
+        self.assertFalse(self.path("usr/bin/xr").is_symlink())
+        self.assertFalse(self.path("usr/bin/XrayR").exists())
+        self.assertFalse(self.path("usr/bin/xrayr").exists())
+        self.assertIn("/etc/xr/config.yml", self.path("etc/init.d/XrayR").read_text())
+        conf = self.path("etc/XrayR-manager.conf").read_text()
+        self.assertIn("XRAYR_SAVED_CMD_NAME=xr", conf)
+        self.assertIn("XRAYR_SAVED_CONFIG_DIR=/etc/xr", conf)
+        self.assertIn("mock-XrayR", self.run_shell("bash /usr/bin/xr version").stdout)
+        self.assertIn("xr status", self.run_shell("bash /usr/bin/xr help").stdout)
+        self.assert_clean()
+
+    def test_mixed_case_command_creates_lowercase_alias(self):
+        self.install(prefix="XRAYR_CMD_NAME=NodeX ")
+        self.assertTrue(self.path("usr/bin/NodeX").is_file())
+        self.assertEqual(os.readlink(self.path("usr/bin/nodex")), "/usr/bin/NodeX")
+        self.assertIn("mock-XrayR", self.run_shell("bash /usr/bin/nodex version").stdout)
+
+    def test_update_keeps_custom_command_name(self):
+        self.install(prefix="XRAYR_CMD_NAME=xr ")
+        self.run_shell("bash /usr/bin/xr update v9.9.9")
+        self.assertTrue(self.path("usr/bin/xr").is_file())
+        self.assertFalse(self.path("usr/bin/XrayR").exists())
+        self.assertIn("XRAYR_SAVED_CMD_NAME=xr", self.path("etc/XrayR-manager.conf").read_text())
+        self.assertIn("/etc/xr/config.yml", self.path("etc/init.d/XrayR").read_text())
+
+    def test_legacy_config_dir_migrates_when_renaming(self):
+        self.write("etc/XrayR/config.yml", "keep-me")
+        self.install(prefix="XRAYR_CMD_NAME=xr ")
+        self.assertEqual(self.path("etc/xr/config.yml").read_text(), "keep-me")
+        self.assertFalse(self.path("etc/XrayR").exists())
+
+    def test_uninstall_removes_custom_command_and_config(self):
+        self.install(prefix="XRAYR_CMD_NAME=xr ")
+        self.run_shell("bash /test/install.sh uninstall")
+        for relative in ("usr/bin/xr", "etc/xr", "etc/XrayR-manager.conf"):
+            self.assertFalse(self.path(relative).exists(), relative)
+
     def test_openrc_manager_start_stop_enable_disable(self):
         self.install()
         for action in ("start", "stop", "enable", "disable"):
