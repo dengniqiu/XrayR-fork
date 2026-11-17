@@ -18,6 +18,7 @@ RELEASE_BASE="https://github.com/${FORK_REPO}/releases/download"
 INSTALL_DIR="${XRAYR_INSTALL_DIR:-${XRAYR_SAVED_INSTALL_DIR:-/usr/local/XrayR}}"
 CMD_NAME="${XRAYR_CMD_NAME:-${XRAYR_SAVED_CMD_NAME:-XrayR}}"
 CMD_ALIAS="${CMD_NAME,,}"
+BINARY_NAME="$CMD_NAME"
 CONFIG_DIR="${XRAYR_CONFIG_DIR:-${XRAYR_SAVED_CONFIG_DIR:-}}"
 if [[ -z "$CONFIG_DIR" ]]; then
     if [[ "$CMD_NAME" == "XrayR" ]]; then
@@ -296,7 +297,7 @@ write_service() {
 #!/sbin/openrc-run
 description="XrayR Service"
 supervisor=supervise-daemon
-command="${INSTALL_DIR}/XrayR"
+command="${INSTALL_DIR}/${BINARY_NAME}"
 command_args="--config \"${CONFIG_DIR}/config.yml\""
 directory="${INSTALL_DIR}"
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -337,7 +338,7 @@ Wants=network.target
 [Service]
 User=root
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/XrayR --config ${CONFIG_DIR}/config.yml
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} --config ${CONFIG_DIR}/config.yml
 EnvironmentFile=-${CONFIG_DIR}/runtime.env
 Restart=on-failure
 RestartSec=10
@@ -440,9 +441,18 @@ install() (
         if [[ "$result" -ne 0 ]]; then
             if [[ "$binary_replaced" -eq 1 ]]; then
                 if [[ "$had_binary" -eq 1 ]]; then
-                    mv -f -- "${tmp_dir}/previous-XrayR" "${INSTALL_DIR}/XrayR" || true
+                    rm -f -- "${INSTALL_DIR}/${BINARY_NAME}"
+                    mv -f -- "${tmp_dir}/previous-XrayR" "$old_binary" || true
                 else
-                    rm -f -- "${INSTALL_DIR}/XrayR"
+                    rm -f -- "${INSTALL_DIR}/${BINARY_NAME}"
+                fi
+            fi
+            if [[ -f "${tmp_dir}/previous-service" ]]; then
+                if [[ "$SERVICE_MANAGER" == openrc ]]; then
+                    cp -p -- "${tmp_dir}/previous-service" "/etc/init.d/${SERVICE_NAME}"
+                else
+                    cp -p -- "${tmp_dir}/previous-service" "/etc/systemd/system/${SERVICE_NAME}.service"
+                    systemctl daemon-reload || true
                 fi
             fi
             if [[ "$was_running" -eq 1 ]]; then
@@ -505,16 +515,28 @@ install() (
     echo -e "${yellow}[4/4] 配置 ${SERVICE_MANAGER} 服务...${plain}"
     # Rename on the same filesystem, retaining the old executable for rollback.
     # Do not create a second in-memory copy or truncate a running executable.
+    if service_installed; then
+        if [[ "$SERVICE_MANAGER" == openrc ]]; then
+            cp -p -- "/etc/init.d/${SERVICE_NAME}" "${tmp_dir}/previous-service"
+        else
+            cp -p -- "/etc/systemd/system/${SERVICE_NAME}.service" "${tmp_dir}/previous-service"
+        fi
+    fi
     if service_installed && service_running; then
         service_action stop
         was_running=1
     fi
-    if [[ -f "${INSTALL_DIR}/XrayR" ]]; then
-        mv -- "${INSTALL_DIR}/XrayR" "${tmp_dir}/previous-XrayR"
+    local old_binary="${INSTALL_DIR}/${BINARY_NAME}"
+    if [[ ! -f "$old_binary" && "$BINARY_NAME" != "XrayR" && -f "${INSTALL_DIR}/XrayR" ]]; then
+        old_binary="${INSTALL_DIR}/XrayR"
+    fi
+    if [[ -f "$old_binary" ]]; then
+        mv -- "$old_binary" "${tmp_dir}/previous-XrayR"
         had_binary=1
     fi
     binary_replaced=1
-    mv -- "$bin_file" "${INSTALL_DIR}/XrayR"
+    mv -- "$bin_file" "${INSTALL_DIR}/${BINARY_NAME}"
+    [[ "$BINARY_NAME" == "XrayR" ]] || rm -f -- "${INSTALL_DIR}/XrayR"
     install_manager_command "${tmp_dir}/xrayr-manager.sh"
     write_manager_settings
     write_runtime_env "$memory_kib"

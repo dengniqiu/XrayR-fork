@@ -12,6 +12,7 @@ FORK_RAW="https://raw.githubusercontent.com/${FORK_REPO}/main"
 INSTALL_DIR="${XRAYR_INSTALL_DIR:-${XRAYR_SAVED_INSTALL_DIR:-/usr/local/XrayR}}"
 CMD_NAME="${XRAYR_CMD_NAME:-${XRAYR_SAVED_CMD_NAME:-XrayR}}"
 CMD_ALIAS="${CMD_NAME,,}"
+BINARY_NAME="$CMD_NAME"
 CONFIG_DIR="${XRAYR_CONFIG_DIR:-${XRAYR_SAVED_CONFIG_DIR:-/etc/XrayR}}"
 SERVICE_NAME="XrayR"
 SERVICE_MANAGER=""
@@ -443,7 +444,9 @@ show_enable_status() {
 
 show_XrayR_version() {
     echo -n "XrayR 版本："
-    "${INSTALL_DIR}/XrayR" version
+    local binary="${INSTALL_DIR}/${BINARY_NAME}"
+    [[ -f "$binary" ]] || binary="${INSTALL_DIR}/XrayR"
+    "$binary" version
     echo ""
     if [[ $# == 0 ]]; then
         before_show_menu

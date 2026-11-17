@@ -283,6 +283,8 @@ esac''')
 
     def test_custom_command_name_and_config_dir(self):
         self.install(prefix="XRAYR_CMD_NAME=xr ")
+        self.assertTrue(self.path("usr/local/XrayR/xr").is_file())
+        self.assertFalse(self.path("usr/local/XrayR/XrayR").exists())
         self.assertTrue(self.path("usr/bin/xr").is_file())
         self.assertFalse(self.path("usr/bin/xr").is_symlink())
         self.assertFalse(self.path("usr/bin/XrayR").exists())
@@ -308,6 +310,27 @@ esac''')
         self.assertFalse(self.path("usr/bin/XrayR").exists())
         self.assertIn("XRAYR_SAVED_CMD_NAME=xr", self.path("etc/XrayR-manager.conf").read_text())
         self.assertIn("/etc/xr/config.yml", self.path("etc/init.d/XrayR").read_text())
+
+    def test_legacy_named_binary_migrates_on_update(self):
+        self.systemd()
+        self.install(prefix="XRAYR_CMD_NAME=xr ")
+        self.path("usr/local/XrayR/xr").rename(self.path("usr/local/XrayR/XrayR"))
+        self.assertIn("mock-XrayR", self.run_shell("bash /usr/bin/xr version").stdout)
+        self.run_shell("bash /usr/bin/xr update v9.9.9")
+        self.assertTrue(self.path("usr/local/XrayR/xr").is_file())
+        self.assertFalse(self.path("usr/local/XrayR/XrayR").exists())
+        self.assertIn("ExecStart=/usr/local/XrayR/xr --config /etc/xr/config.yml",
+                      self.path("etc/systemd/system/XrayR.service").read_text())
+
+    def test_legacy_named_binary_restored_on_failed_restart(self):
+        self.install(prefix="XRAYR_CMD_NAME=xr ")
+        self.path("usr/local/XrayR/xr").rename(self.path("usr/local/XrayR/XrayR"))
+        self.write("test/state", "running")
+        self.write("test/fail-start", "")
+        self.install(ok=False)
+        self.assertTrue(self.path("usr/local/XrayR/XrayR").is_file())
+        self.assertFalse(self.path("usr/local/XrayR/xr").exists())
+        self.assertEqual(self.path("test/state").read_text().strip(), "running")
 
     def test_legacy_config_dir_migrates_when_renaming(self):
         self.write("etc/XrayR/config.yml", "keep-me")
