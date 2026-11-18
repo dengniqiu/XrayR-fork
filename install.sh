@@ -371,6 +371,7 @@ install() (
     [[ $EUID -eq 0 ]] || fail "必须使用 root 用户运行此脚本"
     [[ "$(uname -s)" == "Linux" ]] || fail "仅支持 Linux 系统"
     configure_names
+    BINARY_NAME="$CMD_NAME"
     valid_command_name "$CMD_NAME" || fail "管理命令名称不合法: $CMD_NAME"
     validate_paths
     detect_service_manager

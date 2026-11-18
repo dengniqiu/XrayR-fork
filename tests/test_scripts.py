@@ -297,6 +297,17 @@ esac''')
         self.assertIn("xr status", self.run_shell("bash /usr/bin/xr help").stdout)
         self.assert_clean()
 
+    def test_binary_name_follows_interactive_command_selection(self):
+        self.run_shell(
+            'source /test/install.sh; '
+            'configure_names() { CMD_NAME=panel; CMD_ALIAS=panel; CONFIG_DIR=/etc/panel; }; '
+            'install'
+        )
+        self.assertTrue(self.path("usr/local/XrayR/panel").is_file())
+        self.assertFalse(self.path("usr/local/XrayR/XrayR").exists())
+        self.assertIn('command="/usr/local/XrayR/panel"',
+                      self.path("etc/init.d/XrayR").read_text())
+
     def test_mixed_case_command_creates_lowercase_alias(self):
         self.install(prefix="XRAYR_CMD_NAME=NodeX ")
         self.assertTrue(self.path("usr/bin/NodeX").is_file())
